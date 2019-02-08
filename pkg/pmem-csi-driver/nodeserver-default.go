@@ -31,7 +31,7 @@ func (ns *DefaultNodeServer) NodeGetInfo(ctx context.Context, req *csi.NodeGetIn
 		NodeId: ns.Driver.nodeID,
 		AccessibleTopology: &csi.Topology{
 			Segments: map[string]string{
-				"kubernetes.io/hostname": ns.Driver.nodeID,
+				PmemDriverTopologyKey: ns.Driver.nodeID,
 			},
 		},
 	}, nil
