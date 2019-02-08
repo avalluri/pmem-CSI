@@ -8,6 +8,7 @@ package pmemcsidriver
 
 import (
 	"fmt"
+	"strconv"
 
 	"github.com/google/uuid"
 	"golang.org/x/net/context"
@@ -21,6 +22,14 @@ import (
 	pmemcommon "github.com/intel/pmem-csi/pkg/pmem-common"
 	pmdmanager "github.com/intel/pmem-csi/pkg/pmem-device-manager"
 	"k8s.io/utils/keymutex"
+)
+
+const (
+	pmemParameterKeyNamespaceMode = "nsmode"
+	pmemParameterKeyEraseAfter    = "eraseafter"
+
+	pmemNamespaceModeFsdax  = "fsdax"
+	pmemNamespaceModeSector = "sector"
 )
 
 type nodeVolume struct {
@@ -65,7 +74,7 @@ func (cs *nodeControllerServer) CreateVolume(ctx context.Context, req *csi.Creat
 	topology := []*csi.Topology{}
 	volumeID := ""
 	eraseafter := true
-	nsmode := "fsdax"
+	nsmode := pmemNamespaceModeFsdax
 
 	if err := cs.Driver.ValidateControllerServiceRequest(csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME); err != nil {
 		pmemcommon.Infof(3, ctx, "invalid create volume req: %v", req)
@@ -81,19 +90,18 @@ func (cs *nodeControllerServer) CreateVolume(ctx context.Context, req *csi.Creat
 	}
 
 	// We recognize eraseafter=false/true, defaulting to true
-	for key, val := range req.GetParameters() {
-		glog.Infof("CreateVolume: parameter: [%v] [%v]", key, val)
-		if key == "eraseafter" {
-			if val == "true" {
-				eraseafter = true
-			} else if val == "false" {
-				eraseafter = false
+	if params := req.GetParameters(); params != nil {
+		if val, ok := params[pmemParameterKeyEraseAfter]; ok {
+			if bVal, err := strconv.ParseBool(val); err != nil {
+				eraseafter = bVal
 			}
-		} else if key == "nsmode" {
-			if val == "fsdax" || val == "sector" {
+		}
+		if val, ok := params[pmemParameterKeyNamespaceMode]; ok {
+			if val == pmemNamespaceModeFsdax || val == pmemNamespaceModeSector {
 				nsmode = val
 			}
-		} else if key == "_id" {
+		}
+		if val, ok := params["_id"]; ok {
 			/* use master controller provided volume uid */
 			volumeID = val
 		}
@@ -138,7 +146,7 @@ func (cs *nodeControllerServer) CreateVolume(ctx context.Context, req *csi.Creat
 
 	topology = append(topology, &csi.Topology{
 		Segments: map[string]string{
-			"kubernetes.io/hostname": cs.Driver.nodeID,
+			PmemDriverTopologyKey: cs.Driver.nodeID,
 		},
 	})
 
@@ -238,7 +246,7 @@ func (cs *nodeControllerServer) GetCapacity(ctx context.Context, req *csi.GetCap
 	nsmode := "fsdax"
 	params := req.GetParameters()
 	if params != nil {
-		if mode, ok := params["nsmode"]; ok {
+		if mode, ok := params[pmemParameterKeyNamespaceMode]; ok {
 			nsmode = mode
 		}
 	}
