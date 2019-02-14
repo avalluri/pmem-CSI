@@ -243,16 +243,14 @@ func (cs *masterController) DeleteVolume(ctx context.Context, req *csi.DeleteVol
 
 	pmemcommon.Infof(4, ctx, "DeleteVolume: volumeID: %v", req.GetVolumeId())
 	if vol := cs.getVolumeByID(req.GetVolumeId()); vol != nil {
-		for node := range vol.nodeIDs {
-			conn, err := cs.rs.ConnectToNodeController(node, connectionTimeout)
-			if err != nil {
-				glog.Warningf("Failed to connect to node controller:%s, stale volume(%s) on %s should be cleaned manually", err.Error(), vol.id, node)
+		for node, status := range vol.nodeIDs {
+			if status == Deleted {
+				//Its already deleted, possible case for ephemeral volumes
+				continue
 			}
-
-			if _, err := csi.NewControllerClient(conn).DeleteVolume(ctx, req); err != nil {
+			if _, err := cs.deleteNodeVolume(ctx, node, req); err != nil {
 				glog.Warningf("Failed to delete volume %s on %s: %s", vol.id, node, err.Error())
 			}
-			conn.Close() // nolint:gosec
 		}
 		delete(cs.pmemVolumes, vol.id)
 		pmemcommon.Infof(4, ctx, "DeleteVolume: volume %s deleted", req.GetVolumeId())
@@ -308,12 +306,21 @@ func (cs *masterController) ControllerUnpublishVolume(ctx context.Context, req *
 
 	// Serialize by VolumeId
 	volumeMutex.LockKey(req.VolumeId)
-	defer volumeMutex.UnlockKey(req.VolumeId)
+	defer volumeMutex.UnlockKey(req.VolumeId) //nolint: errcheck
 
 	glog.Infof("ControllerUnpublishVolume : volume_id: %s, node_id: %s ", req.VolumeId, req.NodeId)
 
 	if vol := cs.getVolumeByID(req.VolumeId); vol != nil {
 		vol.nodeIDs[req.NodeId] = Unattached
+		// ephemeral volumes are destroyed as soon as pod stop running
+		if vol.volumeType == pmemPersistencyTypeEphemeral {
+			deleteReq := &csi.DeleteVolumeRequest{VolumeId: vol.id}
+			if _, err := cs.deleteNodeVolume(ctx, req.NodeId, deleteReq); err != nil {
+				glog.Warningf("Failed to delete volume %s on %s: %s", vol.id, req.NodeId, err.Error())
+			} else {
+				vol.nodeIDs[req.NodeId] = Deleted
+			}
+		}
 	} else {
 		return nil, status.Error(codes.NotFound, fmt.Sprintf("No volume with id '%s' found", req.VolumeId))
 	}
@@ -327,28 +334,27 @@ func (cs *masterController) ValidateVolumeCapabilities(ctx context.Context, req 
 	if len(req.GetVolumeId()) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "Volume ID missing in request")
 	}
-
-	_, found := cs.pmemVolumes[req.VolumeId]
-	if !found {
-		return nil, status.Error(codes.NotFound, "No volume found with id %s"+req.VolumeId)
-	}
-
 	if req.GetVolumeCapabilities() == nil {
 		return nil, status.Error(codes.InvalidArgument, "Volume capabilities missing in request")
 	}
 
+	vol := cs.getVolumeByID(req.GetVolumeId())
+	if vol == nil {
+		return nil, status.Error(codes.NotFound, "Volume not created by this controller")
+	}
 	for _, cap := range req.VolumeCapabilities {
-		if cap.GetAccessMode().GetMode() != csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER {
-			return &csi.ValidateVolumeCapabilitiesResponse{
-				Confirmed: nil,
-				Message:   "Driver does not support '" + cap.AccessMode.Mode.String() + "' mode",
-			}, nil
+		mode := cap.GetAccessMode().GetMode()
+		if vol.volumeType == pmemPersistencyTypeEphemeral {
+			// ephemeral volume : supports only single-node writes
+			if mode != csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER {
+				return &csi.ValidateVolumeCapabilitiesResponse{
+					Confirmed: nil,
+					Message:   "Volume does not support '" + cap.AccessMode.Mode.String() + "' mode",
+				}, nil
+			}
 		}
 	}
 
-	/*
-	 * FIXME(avalluri): Need to validate other capabilities against the existing volume
-	 */
 	return &csi.ValidateVolumeCapabilitiesResponse{
 		Confirmed: &csi.ValidateVolumeCapabilitiesResponse_Confirmed{
 			VolumeCapabilities: req.VolumeCapabilities,
@@ -411,6 +417,18 @@ func (cs *masterController) getNodeCapacity(ctx context.Context, node NodeInfo, 
 	}
 
 	return resp.AvailableCapacity, nil
+}
+
+func (cs *masterController) deleteNodeVolume(ctx context.Context, nodeId string, req *csi.DeleteVolumeRequest) (*csi.DeleteVolumeResponse, error) {
+	conn, err := cs.rs.ConnectToNodeController(nodeId, connectionTimeout)
+	if err != nil {
+		glog.Warningf("Failed to connect to node controller:%s, stale volume(%s) on %s should be cleaned manually", err.Error(), req.VolumeId, nodeId)
+		return nil, err
+	}
+
+	defer conn.Close() // nolint:gosec
+
+	return csi.NewControllerClient(conn).DeleteVolume(ctx, req)
 }
 
 func (cs *masterController) getVolumeByID(volumeID string) *pmemVolume {

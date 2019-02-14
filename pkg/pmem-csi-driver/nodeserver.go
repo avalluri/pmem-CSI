@@ -24,10 +24,14 @@ import (
 	"k8s.io/klog/glog"
 )
 
+type publishInfo struct {
+	isPublished bool
+}
+
 type nodeServer struct {
 	*DefaultNodeServer
 	dm      pmdmanager.PmemDeviceManager
-	volInfo map[string]string
+	volInfo map[string]publishInfo
 }
 
 var _ csi.NodeServer = &nodeServer{}
@@ -40,7 +44,7 @@ func NewNodeServer(driver *CSIDriver, dm pmdmanager.PmemDeviceManager) *nodeServ
 	return &nodeServer{
 		DefaultNodeServer: NewDefaultNodeServer(driver),
 		dm:                dm,
-		volInfo:           map[string]string{},
+		volInfo:           map[string]publishInfo{},
 	}
 }
 
@@ -66,7 +70,25 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 
 	// Serialize by VolumeId
 	volumeMutex.LockKey(req.GetVolumeId())
-	defer volumeMutex.UnlockKey(req.GetVolumeId())
+	defer volumeMutex.UnlockKey(req.GetVolumeId()) //nolint: errcheck
+
+	isEphemeral := false
+	if params := req.GetVolumeContext(); params != nil {
+		if val, ok := params[pmemParameterKeyPersistencyType]; ok {
+			if PmemPersistencyType(val) == pmemPersistencyTypeEphemeral {
+				isEphemeral = true
+			}
+		}
+	}
+
+	info, ok := ns.volInfo[req.VolumeId]
+	if ok {
+		if isEphemeral && info.isPublished {
+			return nil, status.Error(codes.FailedPrecondition, "Volume already published")
+		}
+	} else {
+		info = publishInfo{}
+	}
 
 	targetPath := req.TargetPath
 	stagingtargetPath := req.StagingTargetPath
@@ -92,6 +114,9 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 	if err := mounter.Mount(stagingtargetPath, targetPath, "", options); err != nil {
 		return nil, err
 	}
+
+	info.isPublished = true
+	ns.volInfo[req.VolumeId] = info
 
 	return &csi.NodePublishVolumeResponse{}, nil
 }
