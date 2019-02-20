@@ -125,15 +125,47 @@ The [`test/setup-ca-kubernetes.sh`](test/setup-ca-kubernetes.sh) script shows ho
 
 A production deployment can improve upon that by using some other key delivery mechanism, like for example [Vault](https://www.vaultproject.io/).
 
-### Dynamic provisioning
-
-The following diagram illustrates how the PMEM-CSI driver performs dynamic volume provisioning in Kubernetes:
-![sequence diagram](/docs/images/sequence/pmem-csi-sequence-diagram.png)
 <!-- FILL TEMPLATE:
 * Target users and use cases
 * Design decisions & tradeoffs that were made
 * What is in scope and outside of scope
 -->
+
+### Volume Persistency
+
+Normally, volumes are provided by a storage backend that is independent of a particular node. When a node goes offline, the volume can be mounted elsewhere. But PMEM volumes are *local* to node and thus can only be used on the node where they were created. This limits the applications using PMEM volume cannot freely move between nodes. This limitation needs to be considered when designing and deploying applications that are to use *local storage*.
+
+Below are the volume persistency types supported by PMEM-CSI to serve different application usecases:
+
+* Persistent Volumes</br>
+A volume gets created independently of the application, on some node where there is enough free space. Applications using such a volume are then forced to run on that node and cannot run when the node is down. Data is retained until the volume gets deleted.
+
+* Ephemeral Volumes</br>
+An application is assigned to a node and when it starts to run, a new volume is created for it on that node. When the application stops, the volume is deleted. The volume cannot be shared with other applications. Data on this volume is retained only until the application runs.
+
+* Cache Volumes</br>
+Volumes are pred-created on a certain set of nodes, each with its own local data. Applications are started on those nodes and then get to use the volume on their node. Data persists across application restarts. This is useful when the data is only cached information that can be discarded and reconstructed at any time *and* the application can reuse existing local data when restarting.
+
+Volume | Kubernetes | PMEM-CSI | Limitations
+--- | --- | --- | ---
+Persistent | supported | supported | topology aware scheduling<sup>1</sup>
+Ephemeral | [in design](https://github.com/kubernetes/enhancements/blob/master/keps/sig-storage/20190122-csi-inline-volumes.md#proposal) | supported | topology aware scheduling<sup>1</sup>, resource constraints<sup>2</sup>
+Cache | supported | supported | topology aware scheduling<sup>1</sup>
+
+<sup>1 </sup>[Topology aware scheduling](https://github.com/kubernetes/enhancements/issues/490)
+ensures that an application runs on a node where the volume was created. For CSI-based drivers like PMEM-CSI, Kubernetes >= 1.13 is needed. On older Kubernetes releases, pods must be scheduled manually onto the right node(s).
+
+<sup>2 </sup>The upstream design for ephemeral volumes currently does not take [resource constraints](https://github.com/kubernetes/enhancements/pull/716#discussion_r250536632) into account. If an application gets scheduled onto a node and then creating the ephemeral volume on that node fails, the application on the node cannot start until resources become available.
+
+#### Usage on Kubernetes
+
+Kuberntes cluster administrators can expose above mentioned [volume persistency types](#volume-persistency) to applications using [`StorageClass Parameters`](https://kubernetes.io/docs/concepts/storage/storage-classes/#parameters). An optional <code>persistencyType</code> parameter differentiates how the provisioned volume can be used, if no <code>persistencyType</code> specified in StorageClass then it is treated as normal persistant volume.
+
+* <code>persistencyType: ephemeral</code></br>
+Volumes of this type shall be used in combination with <code>volumeBindingMode: WaitForFirstConsumer</code>. In this case PMEM-CSI makes sure that the provisioned volume is not shared by more than one Pod and the PMEM volume gets deleted once the Pod exits. Applications which claim a `cache` volume can only request `ReadWriteOnce` access mode in its `accessModes` list. Check with provided [ephemeral StorageClass](deploy/kubernetes-1.13/pmem-storageclass-ephemeral.yaml) example. This [diagram](/docs/images/sequence/pmem-csi-ephemeral-sequence-diagram.png) illustrates the life cycle of a dynamically provisioned ephemeral volume in Kubernetes using PMEM-CSI driver.
+
+* <code>persistencyType: cache</code></br>
+Volumes of this type shall be used in combination with <code>volumeBindingMode: Immediate</code>. In this case PMEM-CSI creates PMEM volumes on equivalent number of nodes specified in <code>cacheSize</code> StorageClass paramer. Applications which claim a `cache` volume can use `ReadWriteMany` in its `accessModes` list. Check with provided [cache StorageClass](deploy/kubernetes-1.13/pmem-storageclass-cache.yaml) example. This [diagram](/docs/images/sequence/pmem-csi-cache-sequence-diagram.png) illustrates how a cache volume gets provisioned in Kubernetes using PMEM-CSI driver.
 
 ## Prerequisites
 
@@ -162,9 +194,9 @@ The driver deployment in Kubernetes cluster has been verified on:
 
 | Branch            | Kubernetes branch/version      |
 |-------------------|--------------------------------|
-| devel             | Kubernetes 1.11 branch v1.11.3 |
-| devel             | Kubernetes 1.12                |
 | devel             | Kubernetes 1.13                |
+| csi-0.0.3         | Kubernetes 1.11 - 1.12         |
+
 
 ## Setup
 
