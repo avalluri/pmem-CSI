@@ -40,6 +40,11 @@ start: _work/clear-kvm.img _work/kube-clear-kvm _work/start-clear-kvm _work/ssh-
 		touch _work/clear-kvm.secretsdone; \
 	fi
 	_work/ssh-clear-kvm kubectl version --short | grep 'Server Version' | sed -e 's/.*: v\([0-9]*\)\.\([0-9]*\)\..*/\1.\2/' >_work/clear-kvm-kubernetes.version
+	if [ -e deploy/kubernetes-$$(cat _work/clear-kvm-kubernetes.version)/csidriver-crd.yaml ]; then \
+	   	if ! _work/ssh-clear-kvm kubectl get crd/csidrivers.csi.storage.k8s.io  >/dev/null 2>&1; then \
+			_work/ssh-clear-kvm kubectl create -f - <deploy/kubernetes-$$(cat _work/clear-kvm-kubernetes.version)/csidriver-crd.yaml; \
+		fi \
+	fi
 	if ! _work/ssh-clear-kvm kubectl get statefulset.apps/pmem-csi-controller daemonset.apps/pmem-csi >/dev/null 2>&1; then \
 		_work/ssh-clear-kvm kubectl create -f - <deploy/kubernetes-$$(cat _work/clear-kvm-kubernetes.version)/pmem-csi.yaml; \
 	fi
