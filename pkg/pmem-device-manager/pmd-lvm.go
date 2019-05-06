@@ -111,7 +111,7 @@ func (lvm *pmemLvm) CreateDevice(name string, size uint64, nsmode string) error 
 	for _, vg := range vgs {
 		if vg.free >= size {
 			// lvcreate takes size in MBytes if no unit
-			if _, err := pmemexec.RunCommand("lvcreate", "-L", strSz, "-n", name, vg.name); err != nil {
+			if _, err := pmemexec.RunCommand("lvcreate", "-Zn", "-L", strSz, "-n", name, vg.name); err != nil {
 				glog.V(3).Infof("lvcreate failed with error: %v, trying for next free region", err)
 			} else {
 				// clear start of device to avoid old data being recognized as file system
