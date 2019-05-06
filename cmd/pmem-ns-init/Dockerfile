@@ -1,12 +1,16 @@
-FROM golang:alpine AS build
+FROM centos:latest AS build
 
 ARG VERSION
+ARG GO_VERSION
 ARG NDCTL_VERSION
 ARG NDCTL_CONFIGFLAGS
 ARG NDCTL_BUILD_DEPS
 #pull dependencies required for downloading and building libndctl
-RUN apk add --update ${NDCTL_BUILD_DEPS}
+RUN yum update; \
+    yum install -y ${NDCTL_BUILD_DEPS} make; \
+    yum clean all
 
+#build ndctl
 WORKDIR /
 RUN wget https://github.com/pmem/ndctl/archive/v${NDCTL_VERSION}.tar.gz
 RUN tar zxvf v${NDCTL_VERSION}.tar.gz && mv ndctl-${NDCTL_VERSION} ndctl
@@ -15,21 +19,34 @@ RUN ./autogen.sh
 RUN ./configure ${NDCTL_CONFIGFLAGS}
 RUN make install
 
+#setup go dev environment
+RUN wget https://dl.google.com/go/go$GO_VERSION.linux-amd64.tar.gz
+RUN tar -C /usr/local -xzf go$GO_VERSION.linux-amd64.tar.gz
+ENV PATH="/usr/local/go/bin:$PATH"
+ENV PKG_CONFIG_PATH="/usr/lib/pkgconfig"
+
 # build pmem-ns-init
 ADD . /go/src/github.com/intel/pmem-csi
 WORKDIR /go/src/github.com/intel/pmem-csi
+ENV GOPATH=/go
 RUN make pmem-ns-init VERSION=${VERSION}
+RUN mkdir -p /go/bin
 RUN mv ./_output/pmem-ns-init /go/bin/
 
 # build clean container
-FROM golang:alpine
+FROM centos:latest
 LABEL maintainers="Intel"
 LABEL description="Pmem CSI Driver namesapce initializer"
-RUN apk add --update kmod eudev util-linux libuuid e2fsprogs
+RUN yum update; \
+    yum install -y kmod; \
+    yum clean all
+
 # move required binaries and libraries to clean container
 COPY --from=build /usr/lib/libndctl* /usr/lib/
 COPY --from=build /usr/lib/libdaxctl* /usr/lib/
 RUN mkdir -p /go/bin
 COPY --from=build /go/bin/pmem-ns-init /go/bin/
+
+ENV LD_LIBRARY_PATH=/usr/lib
 
 ENTRYPOINT ["/go/bin/pmem-ns-init"]
