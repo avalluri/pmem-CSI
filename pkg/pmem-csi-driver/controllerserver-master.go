@@ -60,7 +60,8 @@ type pmemVolume struct {
 type masterController struct {
 	*DefaultControllerServer
 	rs          *registryserver.RegistryServer
-	pmemVolumes map[string]*pmemVolume //map of reqID:pmemVolume
+	pmemVolumes map[string]*pmemVolume // map of reqID:pmemVolume
+	volListCopy []*pmemVolume          // Copy of pmemVolumes being server by ListVolumes
 	mutex       sync.Mutex             // mutex for pmemVolumes
 }
 
@@ -259,6 +260,10 @@ func (cs *masterController) CreateVolume(ctx context.Context, req *csi.CreateVol
 		cs.mutex.Lock()
 		defer cs.mutex.Unlock()
 		cs.pmemVolumes[volumeID] = vol
+		// append to ListVolumes copy
+		if cs.volListCopy != nil {
+			cs.volListCopy = append(cs.volListCopy, vol)
+		}
 		klog.V(3).Infof("Controller CreateVolume: Record new volume as %v", *vol)
 	}
 
@@ -373,16 +378,18 @@ func (cs *masterController) ListVolumes(ctx context.Context, req *csi.ListVolume
 	cs.mutex.Lock()
 	defer cs.mutex.Unlock()
 
-	// Copy from map into array for pagination.
-	vols := make([]*pmemVolume, 0, len(cs.pmemVolumes))
-	for _, vol := range cs.pmemVolumes {
-		vols = append(vols, vol)
+	if cs.volListCopy == nil {
+		// Copy from map into array for pagination.
+		cs.volListCopy = make([]*pmemVolume, 0, len(cs.pmemVolumes))
+		for _, vol := range cs.pmemVolumes {
+			cs.volListCopy = append(cs.volListCopy, vol)
+		}
 	}
 
 	// Code originally copied from https://github.com/kubernetes-csi/csi-test/blob/f14e3d32125274e0c3a3a5df380e1f89ff7c132b/mock/service/controller.go#L309-L365
 
 	var (
-		ulenVols      = int32(len(vols))
+		ulenVols      = int32(len(cs.volListCopy))
 		maxEntries    = req.MaxEntries
 		startingToken int32
 	)
@@ -415,27 +422,33 @@ func (cs *masterController) ListVolumes(ctx context.Context, req *csi.ListVolume
 	}
 
 	var (
-		i       int
+		i       int32
 		j       = startingToken
-		entries = make(
-			[]*csi.ListVolumesResponse_Entry,
-			maxEntries)
+		entries = make([]*csi.ListVolumesResponse_Entry, 0, maxEntries)
 	)
 
-	for i = 0; i < len(entries); i++ {
-		vol := vols[j]
-		entries[i] = &csi.ListVolumesResponse_Entry{
+	for i < maxEntries && j < ulenVols {
+		vol := cs.volListCopy[j]
+		j++
+		// validate if the volume still exists
+		if cs.pmemVolumes[vol.id] == nil {
+			// volume might have deleted
+			continue
+		}
+		entries = append(entries, &csi.ListVolumesResponse_Entry{
 			Volume: &csi.Volume{
 				VolumeId:      vol.id,
 				CapacityBytes: vol.size,
 			},
-		}
-		j++
+		})
+		i++
 	}
 
 	var nextToken string
-	if n := startingToken + int32(i); n < ulenVols {
-		nextToken = fmt.Sprintf("%d", n)
+	if j < ulenVols {
+		nextToken = fmt.Sprintf("%d", j)
+	} else {
+		cs.volListCopy = nil
 	}
 
 	return &csi.ListVolumesResponse{
